@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "SkipSense",
+  "version": "1.0.0",
+  "description": "Local AI for skipping video chat connections based on presentation.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "*://*.ome.tv/*"
+  ],
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.ome.tv/*"],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Open SkipSense"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "models/*",
+        "assets/*",
+        "src/worker/inference.worker.ts"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build output
+dist
+dist-ssr
+*.local
+
+# Downloaded AI Models & WASM binaries (populated automatically by setup-models.mjs)
+public/models/*.onnx
+public/models/*.tflite
+public/models/*.wasm
+public/models/vision_wasm_internal.js
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor & OS files
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvsoid
+*.njsproj
+*.sln
+*.sw?
+
+# Testing & Cache
+coverage
+.vite
