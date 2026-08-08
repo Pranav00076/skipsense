@@ -13,7 +13,7 @@ export class MessageBus {
    * Initializes the message listener. Should be called once per context (background, content, popup).
    */
   static init() {
-    if (this.isListening || typeof chrome === 'undefined' || !chrome.runtime) return;
+    if (this.isListening || typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.onMessage) return;
     
     chrome.runtime.onMessage.addListener((message: BaseMessage, sender, sendResponse) => {
       if (!message || !message.type) return;
@@ -55,38 +55,50 @@ export class MessageBus {
   }
 
   /**
-   * Send a message to the background script or other contexts via runtime.
+   * Send a message across extension contexts safely without port closed errors.
    */
   static send<T extends BaseMessage>(message: T): Promise<any> {
-    if (typeof chrome === 'undefined' || !chrome.runtime) return Promise.resolve();
+    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+      return Promise.resolve();
+    }
     
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          console.warn(`[SkipSense MessageBus] Error sending ${message.type}:`, chrome.runtime.lastError.message);
-          resolve(undefined); // Don't throw, just resolve empty to prevent unhandled rejections
-        } else {
-          resolve(response);
-        }
-      });
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          // Chrome sets lastError when no receiver is active (e.g., popup closed).
+          // We consume it silently to prevent noisy warnings in the extensions tab.
+          if (chrome.runtime.lastError) {
+            resolve(undefined);
+          } else {
+            resolve(response);
+          }
+        });
+      } catch {
+        resolve(undefined);
+      }
     });
   }
 
   /**
-   * Send a message specifically to a tab (e.g., from background to content script).
+   * Send a message specifically to a tab.
    */
   static sendToTab<T extends BaseMessage>(tabId: number, message: T): Promise<any> {
-    if (typeof chrome === 'undefined' || !chrome.tabs) return Promise.resolve();
+    if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.tabs.sendMessage) {
+      return Promise.resolve();
+    }
     
     return new Promise((resolve) => {
-      chrome.tabs.sendMessage(tabId, message, (response) => {
-        if (chrome.runtime.lastError) {
-          console.warn(`[SkipSense MessageBus] Error sending ${message.type} to tab ${tabId}:`, chrome.runtime.lastError.message);
-          resolve(undefined);
-        } else {
-          resolve(response);
-        }
-      });
+      try {
+        chrome.tabs.sendMessage(tabId, message, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve(undefined);
+          } else {
+            resolve(response);
+          }
+        });
+      } catch {
+        resolve(undefined);
+      }
     });
   }
 }

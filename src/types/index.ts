@@ -52,6 +52,8 @@ export interface InferenceResult {
   confidence: number;
   faceCount: number;
   processingTimeMs: number;
+  qualityIssue?: 'TOO_DARK' | 'TOO_BRIGHT' | 'BLURRY_OR_COVERED' | 'NONE';
+  groupPredictions?: { prediction: InferencePrediction; confidence: number }[];
   error?: string;
 }
 

@@ -2,14 +2,14 @@ import { SiteAdapter } from '../sites/SiteAdapter';
 import { StateMachine } from '../core/StateMachine';
 import { MessageBus } from '../core/MessageBus';
 import { DecisionEngine } from '../core/DecisionEngine';
-import { StorageService } from '../storage/StorageService';
+import { StorageService, DEFAULT_SETTINGS } from '../storage/StorageService';
 import { ExtensionSettings, InferenceResult } from '../types';
 import { InferencePipeline } from '../ai/InferencePipeline';
 
 export class ContentObserver {
   private adapter: SiteAdapter;
   private fsm: StateMachine;
-  private settings!: ExtensionSettings;
+  private settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
   private pipeline: InferencePipeline;
   
   private currentRetryCount = 0;
@@ -18,6 +18,7 @@ export class ContentObserver {
   private frameCtx: OffscreenCanvasRenderingContext2D;
   private isProcessingFrame = false;
   private currentConnectionId = 0;
+  private hudElement: HTMLElement | null = null;
 
   constructor(adapter: SiteAdapter) {
     this.adapter = adapter;
@@ -33,19 +34,41 @@ export class ContentObserver {
     console.log('[SkipSense Content] Starting ContentObserver on OmeTV...');
     
     // 1. Fetch initial settings directly from storage
-    this.settings = await StorageService.getSettings();
-
-    // 2. Listen for settings updates via MessageBus
-    MessageBus.on('SETTINGS_UPDATED', (msg) => {
-      this.settings = msg.payload.settings;
-      if (!this.settings.enabled && this.fsm.getState() !== 'Paused') {
-         this.fsm.transition('Paused', 'User disabled extension');
-      } else if (this.settings.enabled && this.fsm.getState() === 'Paused') {
-         this.fsm.transition('Idle', 'User enabled extension');
+    try {
+      const stored = await StorageService.getSettings();
+      if (stored) {
+        this.settings = { ...this.settings, ...stored };
       }
-    });
+    } catch {}
 
-    // 3. Initialize AI Models directly in content window
+    // 2. Real-time storage sync
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'sync' && changes.settings) {
+          this.settings = { ...this.settings, ...changes.settings.newValue };
+          this.updateHUD(`Target: ${this.settings.targetPresentation}`);
+        }
+      });
+    }
+
+    // 3. Listen for direct queries from popup
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+        if (request?.type === 'GET_FSM_STATE') {
+          sendResponse({
+            state: this.fsm.getState(),
+            connected: this.adapter.isConnected(),
+            settings: this.settings
+          });
+          return false;
+        }
+      });
+    }
+
+    // 4. Create floating UI badge for live visual feedback
+    this.initHUD();
+
+    // 5. Initialize AI Models directly in content window
     try {
       await this.pipeline.initialize({
         wasm: chrome.runtime.getURL('models/'),
@@ -53,47 +76,89 @@ export class ContentObserver {
         genderModel: chrome.runtime.getURL('models/genderage.onnx')
       }, this.settings?.preferredModelBackend || 'WASM');
       console.log('[SkipSense Content] Local AI models ready.');
+      this.updateHUD('AI Engine Ready');
     } catch (e) {
       console.error('[SkipSense Content] Failed to initialize local AI models:', e);
+      this.updateHUD('AI Init Error');
     }
 
-    // 4. Initialize Adapter
+    // 6. Initialize Adapter
     this.adapter.initialize();
     
-    // 5. Setup FSM Handlers
+    // 7. Setup FSM Handlers
     this.setupStateMachine();
 
-    // 6. Listen for connection changes from OmeTV
+    // 8. Listen for connection changes from OmeTV
     this.adapter.observeConnectionChanges((isConnected) => {
-      if (isConnected && (this.fsm.getState() === 'WaitingForConnection' || this.fsm.getState() === 'Idle')) {
-        this.fsm.transition('WaitingDelay', 'Stranger connected');
-      } else if (!isConnected && this.fsm.getState() !== 'WaitingForConnection') {
-        this.fsm.transition('WaitingForConnection', 'Stranger disconnected');
+      if (isConnected) {
+        if (['WaitingForConnection', 'Idle', 'Initializing'].includes(this.fsm.getState())) {
+          this.fsm.transition('WaitingDelay', 'Stranger connected');
+        }
+      } else {
+        if (this.fsm.getState() !== 'WaitingForConnection' && this.fsm.getState() !== 'Paused') {
+          this.fsm.transition('WaitingForConnection', 'Stranger disconnected');
+        }
       }
     });
 
-    // 7. Set initial state
+    // 9. Initial state transition
     if (this.fsm.getState() === 'Initializing') {
       this.fsm.transition('Idle', 'Init complete');
-      if (this.settings?.enabled) {
-         if (this.adapter.isConnected()) {
-            this.fsm.transition('WaitingDelay', 'Stranger already connected on load');
-         } else {
-            this.fsm.transition('WaitingForConnection', 'Extension active, waiting for stranger');
-         }
+      if (this.settings.enabled) {
+        if (this.adapter.isConnected()) {
+          this.fsm.transition('WaitingDelay', 'Stranger connected on start');
+        } else {
+          this.fsm.transition('WaitingForConnection', 'Ready for stranger');
+        }
       }
+    }
+  }
+
+  private initHUD() {
+    if (document.getElementById('skipsense-hud')) return;
+    const hud = document.createElement('div');
+    hud.id = 'skipsense-hud';
+    hud.style.cssText = `
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 999999;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      pointer-events: none;
+      transition: all 0.2s ease;
+    `;
+    hud.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:#22c55e;"></span> SkipSense: Ready`;
+    document.body.appendChild(hud);
+    this.hudElement = hud;
+  }
+
+  private updateHUD(text: string, color = '#38bdf8') {
+    if (this.hudElement) {
+      this.hudElement.style.color = color;
+      this.hudElement.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${color};"></span> SkipSense: ${text}`;
     }
   }
 
   private setupStateMachine() {
     this.fsm.subscribe((_from, to) => {
+      this.updateHUD(to);
+
       if (to === 'WaitingDelay') {
-        // Start delay timer
         setTimeout(() => {
-          if (this.fsm.getState() === 'WaitingDelay' && this.adapter.isConnected()) {
-            this.fsm.transition('CapturingFrame', 'Delay finished');
-          } else if (!this.adapter.isConnected()) {
-            this.fsm.transition('WaitingForConnection', 'Stranger disconnected during delay');
+          if (this.fsm.getState() === 'WaitingDelay') {
+            this.fsm.transition('CapturingFrame', 'Delay completed');
           }
         }, this.settings.detectionDelayMs || 500);
       }
@@ -103,8 +168,8 @@ export class ContentObserver {
       }
 
       if (to === 'WaitingForConnection') {
-        this.currentRetryCount = 0; // Reset retries for new stranger
-        this.currentConnectionId++; // Invalidate stale frames
+        this.currentRetryCount = 0;
+        this.currentConnectionId++;
       }
     });
   }
@@ -116,21 +181,21 @@ export class ContentObserver {
 
     try {
       const video = this.adapter.getVideo();
-      if (!video || !this.adapter.isConnected()) {
+      if (!video) {
         this.fsm.transition('WaitingForConnection', 'Video stream unavailable');
         this.isProcessingFrame = false;
         return;
       }
 
-      // Throttle inferences to prevent spam
+      // Throttle inferences
       const now = performance.now();
-      if (now - this.lastInferenceTime < (this.settings.maxInferenceIntervalMs || 1000)) {
+      if (now - this.lastInferenceTime < (this.settings.maxInferenceIntervalMs || 600)) {
         setTimeout(() => {
            this.isProcessingFrame = false;
            if (this.fsm.getState() === 'CapturingFrame' && connectionId === this.currentConnectionId) {
              this.captureAndInfer();
            }
-        }, (this.settings.maxInferenceIntervalMs || 1000) - (now - this.lastInferenceTime));
+        }, (this.settings.maxInferenceIntervalMs || 600) - (now - this.lastInferenceTime));
         return;
       }
       this.lastInferenceTime = now;
@@ -139,7 +204,7 @@ export class ContentObserver {
       this.frameCtx.drawImage(video, 0, 0, 224, 224);
       const imageBitmap = this.frameCanvas.transferToImageBitmap();
 
-      this.fsm.transition('DetectingFace', 'Running local face detector and ONNX classifier');
+      this.fsm.transition('DetectingFace', 'Analyzing stranger');
       
       // Run direct on-device inference
       const result = await this.pipeline.execute(imageBitmap);
@@ -152,31 +217,31 @@ export class ContentObserver {
       this.fsm.transition('Error', 'Inference capture error');
       this.isProcessingFrame = false;
       
-      // Auto recover after error
       setTimeout(() => {
         if (this.fsm.getState() === 'Error') {
           this.fsm.transition('WaitingForConnection', 'Error recovery');
         }
-      }, 1000);
+      }, 600);
     }
   }
 
   private handleInferenceResult(result: InferenceResult) {
     this.isProcessingFrame = false;
     
-    // Ensure we are still in a valid active state
     if (!['DetectingFace', 'RunningInference'].includes(this.fsm.getState())) {
       return; 
     }
 
-    this.fsm.transition('MakingDecision', `Result: ${result.prediction} (${(result.confidence * 100).toFixed(0)}%)`);
+    const confPercent = (result.confidence * 100).toFixed(0);
+    this.fsm.transition('MakingDecision', `Result: ${result.prediction} (${confPercent}%)`);
 
     // Evaluate Decision
     const decision = DecisionEngine.evaluate(result, this.settings, this.currentRetryCount);
     
-    console.log(`[SkipSense Decision] Prediction: ${result.prediction} | Confidence: ${result.confidence.toFixed(2)} | Action: ${decision}`);
+    console.log(`[SkipSense Decision] Prediction: ${result.prediction} | Confidence: ${result.confidence.toFixed(2)} | Target: ${this.settings.targetPresentation} | Action: ${decision}`);
+    this.updateHUD(`${result.prediction} (${confPercent}%) -> ${decision}`, decision === 'SKIP' ? '#ef4444' : '#22c55e');
 
-    // Broadcast stats update to Popup & Storage
+    // Broadcast stats update
     MessageBus.send({
       type: 'STATS_UPDATED',
       payload: {
@@ -200,14 +265,14 @@ export class ContentObserver {
          if (this.fsm.getState() === 'WaitingNextConnection') {
             this.fsm.transition('WaitingForConnection', 'Ready for next stranger');
          }
-      }, 500);
+      }, 350);
 
     } else if (decision === 'RETRY') {
       this.currentRetryCount++;
       console.log(`[SkipSense Retry] Retrying detection (${this.currentRetryCount}/${this.settings.maxRetries})...`);
       this.fsm.transition('WaitingDelay', 'Retrying frame inference');
     } else if (decision === 'STAY' || decision === 'WAIT') {
-      this.fsm.transition('WaitingForConnection', 'Decision accepted (STAY/WAIT)');
+      this.fsm.transition('WaitingForConnection', 'Decision accepted (STAY)');
     }
   }
 

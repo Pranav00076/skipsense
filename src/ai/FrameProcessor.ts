@@ -1,6 +1,6 @@
-import { Detection } from '@mediapipe/tasks-vision';
 import * as ort from 'onnxruntime-web';
 import { ModelMetadata } from './GenderClassifier';
+import { DetectionResult } from './FaceDetector';
 
 export class FrameProcessor {
   private canvas: OffscreenCanvas;
@@ -22,8 +22,6 @@ export class FrameProcessor {
    */
   public adaptToModel(metadata: ModelMetadata) {
     if (metadata.inputShape.length === 4) {
-      // Shape is typically [1, 3, Height, Width] or [1, Height, Width, 3]
-      // ONNX is usually NCHW, so Height is at index 2, Width at index 3
       const height = metadata.inputShape[2];
       const width = metadata.inputShape[3];
       
@@ -38,18 +36,14 @@ export class FrameProcessor {
   }
 
   /**
-   * Crops the face, draws it to the dynamic offscreen canvas, and returns the normalized Tensor.
+   * Crops the face ROI, draws it to the dynamic offscreen canvas, and returns the normalized Tensor.
    */
-  public processFace(image: ImageBitmap, face: Detection): ort.Tensor {
-    if (!face.boundingBox) {
-      throw new Error('Face detection missing bounding box');
-    }
-
+  public processFace(image: ImageBitmap, face: DetectionResult): ort.Tensor {
     const { originX, originY, width, height } = face.boundingBox;
     
-    // Add margin (e.g., 20%) around the face
-    const marginX = width * 0.2;
-    const marginY = height * 0.2;
+    // Add 10% margin around face
+    const marginX = width * 0.1;
+    const marginY = height * 0.1;
     
     const cropX = Math.max(0, originX - marginX);
     const cropY = Math.max(0, originY - marginY);

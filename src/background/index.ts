@@ -31,7 +31,7 @@ class BackgroundService {
     });
 
     // Handle Stats Updates from Content Scripts
-    MessageBus.on('STATS_UPDATED', (message) => {
+    MessageBus.on('STATS_UPDATED', (message, _sender, sendResponse) => {
       if (message.payload) {
         StorageService.updateStats(message.payload).then((updatedStats) => {
           this.stats = updatedStats;
@@ -40,16 +40,20 @@ class BackgroundService {
              type: 'STATS_UPDATED',
              payload: { stats: this.stats }
           });
+          sendResponse({ success: true });
         });
+        return true; // Keep channel open for async response
       }
+      sendResponse({ success: false });
       return false;
     });
 
     // Log State Changes for Debugging
-    MessageBus.on('FSM_STATE_CHANGE', (message) => {
+    MessageBus.on('FSM_STATE_CHANGE', (message, _sender, sendResponse) => {
        if (this.settings?.debugMode) {
           console.log(`[SkipSense State] ${message.payload.from} -> ${message.payload.to}`);
        }
+       sendResponse({ received: true });
        return false;
     });
   }

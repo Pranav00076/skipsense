@@ -3,12 +3,14 @@ import { GenderClassifier } from './GenderClassifier';
 import { FrameProcessor } from './FrameProcessor';
 import { InferenceResult, ModelBackend } from '../types';
 import { ModelManager } from './ModelManager';
-import { Detection } from '@mediapipe/tasks-vision';
+import { QualityChecker } from './QualityChecker';
 
 export class InferencePipeline {
   private faceDetector: FaceDetector;
   private genderClassifier: GenderClassifier;
   private frameProcessor: FrameProcessor;
+  private qualityCanvas: OffscreenCanvas;
+  private qualityCtx: OffscreenCanvasRenderingContext2D;
   private isInitializing = false;
   private isReady = false;
 
@@ -16,6 +18,8 @@ export class InferencePipeline {
     this.faceDetector = new FaceDetector();
     this.genderClassifier = new GenderClassifier();
     this.frameProcessor = new FrameProcessor();
+    this.qualityCanvas = new OffscreenCanvas(64, 64);
+    this.qualityCtx = this.qualityCanvas.getContext('2d', { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
   }
 
   async initialize(urls: { wasm: string, faceModel: string, genderModel: string }, backend: ModelBackend): Promise<void> {
@@ -29,7 +33,7 @@ export class InferencePipeline {
       await ModelManager.validateAll();
       
       // 2. Load models
-      await Promise.allSettled([
+      await Promise.all([
         this.faceDetector.initialize(urls.wasm, urls.faceModel),
         this.genderClassifier.initialize(urls.genderModel, backend)
       ]);
@@ -40,7 +44,7 @@ export class InferencePipeline {
       }
       
       this.isReady = true;
-      console.log('[SkipSense AI] AI Pipeline is fully ready.');
+      console.log('[SkipSense AI] AI Pipeline is fully ready and operational.');
     } catch (error) {
       console.error('[SkipSense AI] Failed to initialize AI pipeline:', error);
       throw error;
@@ -59,37 +63,52 @@ export class InferencePipeline {
       prediction: 'UNKNOWN',
       confidence: 0,
       faceCount: 0,
-      processingTimeMs: 0
+      processingTimeMs: 0,
+      qualityIssue: 'NONE',
+      groupPredictions: []
     };
 
     try {
-      const faces = this.faceDetector.detect(image);
-      result.faceCount = faces.length;
+      // 1. Frame Quality & Lighting Check (Too dark, Too bright, Covered camera, Bad angle)
+      this.qualityCtx.drawImage(image, 0, 0, 64, 64);
+      const qualityImageData = this.qualityCtx.getImageData(0, 0, 64, 64);
+      const quality = QualityChecker.analyze(qualityImageData);
 
-      // If face detected, use detection box; otherwise use center crop of webcam frame
-      const faceDetection: Detection = faces.length === 1 ? faces[0] : {
-        boundingBox: {
-          originX: Math.floor(image.width * 0.1),
-          originY: Math.floor(image.height * 0.1),
-          width: Math.floor(image.width * 0.8),
-          height: Math.floor(image.height * 0.8),
-          angle: 0
-        },
-        categories: [],
-        keypoints: []
-      };
-
-      if (faces.length === 0) {
-        result.faceCount = 1; // Counted as 1 face candidate from webcam center crop
+      if (!quality.isAcceptable) {
+        result.qualityIssue = quality.issue;
+        result.error = quality.reason;
+        console.log(`[SkipSense Quality] Frame quality check failed: ${quality.issue} (${quality.reason})`);
+        return result;
       }
 
-      const inputTensor = this.frameProcessor.processFace(image, faceDetection);
-      const prediction = await this.genderClassifier.predict(inputTensor);
+      // 2. Multi-Person Spatial Group & Facial Pyramid Detection
+      const detections = this.faceDetector.detect(image);
+      result.faceCount = detections.length;
+
+      const groupResults: { prediction: 'MALE' | 'FEMALE', confidence: number }[] = [];
+
+      for (const detection of detections) {
+        const inputTensor = this.frameProcessor.processFace(image, detection);
+        const pred = await this.genderClassifier.predict(inputTensor);
+        inputTensor.dispose();
+        groupResults.push(pred);
+      }
+
+      result.groupPredictions = groupResults;
+
+      // Group Decision Rule:
+      // If ANY region in the frame detects a MALE with confidence >= 0.45 -> flag as MALE
+      const malesFound = groupResults.filter(g => g.prediction === 'MALE' && g.confidence >= 0.45);
       
-      result.prediction = prediction.prediction;
-      result.confidence = prediction.confidence;
-      
-      inputTensor.dispose();
+      if (malesFound.length > 0) {
+        const topMale = malesFound.reduce((prev, curr) => curr.confidence > prev.confidence ? curr : prev);
+        result.prediction = 'MALE';
+        result.confidence = topMale.confidence;
+      } else {
+        const topFemale = groupResults.reduce((prev, curr) => curr.confidence > prev.confidence ? curr : prev, groupResults[0]);
+        result.prediction = topFemale ? topFemale.prediction : 'FEMALE';
+        result.confidence = topFemale ? topFemale.confidence : 0.60;
+      }
 
     } catch (error: any) {
       console.error('[SkipSense AI] Pipeline Execution Error:', error);

@@ -8,17 +8,39 @@ import DebugPanel from '../components/DebugPanel';
 export default function PopupApp() {
   const [settings, setSettings] = useState<ExtensionSettings | null>(null);
   const [stats, setStats] = useState<ExtensionStats | null>(null);
-  const [fsmState, setFsmState] = useState<FSMState>('Initializing');
+  const [fsmState, setFsmState] = useState<FSMState>('WaitingForConnection');
 
   useEffect(() => {
-    // Initial Load
+    // 1. Initial Storage Load
     StorageService.getSettings().then(setSettings);
     StorageService.getStats().then(setStats);
 
-    // Listeners
-    MessageBus.on('SETTINGS_UPDATED', (msg) => setSettings(msg.payload.settings));
-    MessageBus.on('STATS_UPDATED', (msg) => setStats(msg.payload.stats));
-    MessageBus.on('FSM_STATE_CHANGE', (msg) => setFsmState(msg.payload.to));
+    // 2. Query Active Content Script for real-time FSM state
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.query) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]?.id) {
+          chrome.tabs.sendMessage(tabs[0].id, { type: 'GET_FSM_STATE' }, (resp) => {
+            if (resp?.state) {
+              setFsmState(resp.state);
+            }
+            if (resp?.settings) {
+              setSettings(resp.settings);
+            }
+          });
+        }
+      });
+    }
+
+    // 3. Listeners
+    MessageBus.on('SETTINGS_UPDATED', (msg) => {
+      if (msg?.payload?.settings) setSettings(msg.payload.settings);
+    });
+    MessageBus.on('STATS_UPDATED', (msg) => {
+      if (msg?.payload?.stats) setStats(msg.payload.stats);
+    });
+    MessageBus.on('FSM_STATE_CHANGE', (msg) => {
+      if (msg?.payload?.to) setFsmState(msg.payload.to);
+    });
   }, []);
 
   if (!settings || !stats) {

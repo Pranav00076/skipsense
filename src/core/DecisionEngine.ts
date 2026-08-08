@@ -3,7 +3,7 @@ import { DecisionAction, ExtensionSettings, InferenceResult } from '../types';
 export class DecisionEngine {
   /**
    * Evaluates the inference result against the user's settings to determine the next action.
-   * This is a pure function. It does NOT interact with the DOM or the State Machine.
+   * Handles individual strangers, multi-person groups, lighting quality, and bad camera angles.
    * 
    * @param result The output from the AI pipeline
    * @param settings The user's current preferences
@@ -21,41 +21,56 @@ export class DecisionEngine {
       return 'STAY';
     }
 
-    // 2. Handle Errors (e.g. Model failure)
-    if (result.error) {
-       // If the model actually threw an error, we should probably just WAIT or STAY and let the user decide.
-       return 'STAY';
+    // 2. Handle Camera Angle & Lighting Quality (Too Dark, Too Bright, Covered Camera, Blurry)
+    if (result.qualityIssue && result.qualityIssue !== 'NONE') {
+      console.log(`[SkipSense Decision] Quality issue detected (${result.qualityIssue}) -> AUTO-SKIPPING.`);
+      return 'SKIP';
     }
 
-    // 3. Handle NO faces or MULTIPLE faces
-    if (result.faceCount !== 1 || result.prediction === 'UNKNOWN') {
-      if (currentRetryCount < settings.maxRetries) {
-        return 'RETRY';
+    // 3. Handle Model Failure
+    if (result.error && !result.groupPredictions?.length) {
+       return 'SKIP';
+    }
+
+    // 4. Handle Group Detection:
+    // If target is FEMALE and ANY person in the picture/group is MALE -> SKIP!
+    if (settings.targetPresentation === 'FEMALE') {
+      const anyMaleInGroup = result.groupPredictions?.some(p => p.prediction === 'MALE' && p.confidence >= 0.50);
+      if (anyMaleInGroup || result.prediction === 'MALE') {
+        console.log(`[SkipSense Decision] Group check: Male detected in frame -> AUTO-SKIPPING.`);
+        return 'SKIP';
       }
-      // Out of retries, fallback to unknown behavior setting
-      return this.mapUnknownBehavior(settings.unknownBehavior);
     }
 
-    // 4. Handle Confidence Threshold
-    if (result.confidence < settings.confidenceThreshold) {
-      if (currentRetryCount < settings.maxRetries) {
-        return 'RETRY';
+    // If target is MALE and ANY person in the group is FEMALE -> SKIP!
+    if (settings.targetPresentation === 'MALE') {
+      const anyFemaleInGroup = result.groupPredictions?.some(p => p.prediction === 'FEMALE' && p.confidence >= 0.50);
+      if (anyFemaleInGroup || result.prediction === 'FEMALE') {
+        console.log(`[SkipSense Decision] Group check: Female detected in frame -> AUTO-SKIPPING.`);
+        return 'SKIP';
       }
-      // Out of retries, confidence is too low -> treat as UNKNOWN
-      return this.mapUnknownBehavior(settings.unknownBehavior);
     }
 
-    // 5. Evaluate Target Presentation
+    // 5. Handle Target Presentation ANY
     if (settings.targetPresentation === 'ANY') {
       return 'STAY';
     }
 
+    // 6. Handle Confidence Threshold
+    const minThreshold = settings.confidenceThreshold || 0.50;
+    if (result.confidence < minThreshold) {
+      if (currentRetryCount < settings.maxRetries) {
+        return 'RETRY';
+      }
+      return this.mapUnknownBehavior(settings.unknownBehavior);
+    }
+
+    // 7. Standard Single Target Matching
     if (result.prediction !== settings.targetPresentation) {
-      // The prediction does NOT match what the user wants -> SKIP
       return 'SKIP';
     }
 
-    // It matches what the user wants! -> STAY
+    // It matches what the user wants!
     return 'STAY';
   }
 
@@ -63,8 +78,8 @@ export class DecisionEngine {
     switch (behavior) {
       case 'SKIP': return 'SKIP';
       case 'WAIT': return 'WAIT';
-      case 'RETRY': return 'STAY'; // If out of retries but behavior says retry, we must STAY to avoid infinite loops, or just WAIT. Let's return WAIT.
-      default: return 'WAIT';
+      case 'RETRY': return 'SKIP';
+      default: return 'SKIP';
     }
   }
 }

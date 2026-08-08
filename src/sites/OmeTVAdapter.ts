@@ -21,13 +21,13 @@ export class OmeTVAdapter implements SiteAdapter {
       attributeFilter: ['class', 'style', 'src', 'data-state']
     });
 
-    // 2. Poll actively every 300ms
+    // 2. Continuous high-frequency polling
     this.pollInterval = setInterval(() => {
       this.checkConnectionState();
-    }, 300);
+    }, 200);
 
     // 3. Listen to media stream lifecycle events on window/document
-    ['playing', 'play', 'loadeddata', 'timeupdate', 'pause', 'ended'].forEach(evtName => {
+    ['playing', 'play', 'loadeddata', 'timeupdate', 'canplay'].forEach(evtName => {
       window.addEventListener(evtName, () => this.checkConnectionState(), true);
     });
 
@@ -40,54 +40,70 @@ export class OmeTVAdapter implements SiteAdapter {
     return host.includes('ome.tv') || host.includes('ometv') || host.includes('chat') || true;
   }
 
+  /**
+   * On OmeTV:
+   * - Left box = Remote Stranger Video
+   * - Right box = Local Webcam (Self)
+   * We strictly target the Remote Stranger Video on the left!
+   */
   getVideo(): HTMLVideoElement | null {
     const videos = Array.from(document.querySelectorAll('video'));
     if (videos.length === 0) return null;
 
-    // 1. Remote video is typically unmuted and actively playing frames
-    const remoteVideo = videos.find(v => 
-      v.readyState >= 2 && 
-      v.videoWidth > 10 && 
-      !v.muted &&
-      !v.paused
-    );
-    if (remoteVideo) return remoteVideo;
-
-    // 2. Largest active video on screen (if muted property is unset or manipulated)
-    const activeVideos = videos.filter(v => v.videoWidth > 50 && v.videoHeight > 50 && !v.paused);
-    if (activeVideos.length > 0) {
-      activeVideos.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight));
-      return activeVideos[0];
+    // 1. If explicit remote video ID or selector exists
+    const specificRemote = document.querySelector('video#remote-video, video.remote-video, [data-qa="remote-video"] video, .video-container:first-child video') as HTMLVideoElement;
+    if (specificRemote && specificRemote.videoWidth > 10 && !specificRemote.paused) {
+      return specificRemote;
     }
 
-    // 3. Any video with valid dimensions
-    const anyPlaying = videos.find(v => v.videoWidth > 50 && v.videoHeight > 50);
-    return anyPlaying || videos[0] || null;
+    // 2. In OmeTV two-video layout, videos[0] is the Remote Stranger (Left), videos[1] is Local (Right)
+    if (videos.length >= 2) {
+      const remote = videos[0]; // Remote is on the left
+      if (remote && remote.videoWidth > 10 && !remote.paused) {
+        return remote;
+      }
+    }
+
+    // 3. Any active video with valid dimensions that is not explicitly marked local
+    const activeRemote = videos.find(v => !v.id.includes('local') && !v.className.includes('local') && v.videoWidth > 10 && !v.paused);
+    return activeRemote || videos[0] || null;
   }
 
+  /**
+   * Targets the large green "Next" button or "Stop" button in the bottom left
+   */
   getNextButton(): HTMLElement | null {
-    // 1. Check for "Are you there?" or "Start" confirmation modal buttons first
-    const modalButtons = Array.from(document.querySelectorAll('[class*="modal"] button, [role="dialog"] button, .modal button, .popup button'));
+    // 1. Check for modal confirmation buttons first
+    const modalButtons = Array.from(document.querySelectorAll('[class*="modal"] button, [role="dialog"] button, .modal button, .popup button, .button-start'));
     if (modalButtons.length > 0) {
       return modalButtons[0] as HTMLElement;
     }
 
+    // 2. Match exact text "Next" or "Start" on buttons
+    const allButtons = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"], .buttons > *'));
+    const textNextBtn = allButtons.find(btn => {
+      const text = btn.textContent?.trim().toLowerCase() || '';
+      return text === 'next' || text === 'start';
+    }) as HTMLElement;
+
+    if (textNextBtn) {
+      return textNextBtn;
+    }
+
+    // 3. Fallback selectors
     const selectors = [
       'button.btn-next',
-      'button.btn-skip',
       '.buttons__button_next',
       '.buttons__button_start',
-      'button[data-testid="next-button"]',
-      'button[data-action="next"]',
+      '.button-next',
+      '.btn-start-stop',
+      '.button-start',
+      '.btn-start',
       'button[aria-label="Next"]',
       'button[aria-label="Skip"]',
       '.chat-button-next',
-      '.button-next',
-      '.buttons .next-button',
-      'button svg path[d*="M12 4l-1.41"]',
-      '.btn-start-stop',
-      '.chat-button',
-      '.button-start'
+      'button.btn-stop',
+      '.btn-stop'
     ];
 
     for (const selector of selectors) {
@@ -97,28 +113,31 @@ export class OmeTVAdapter implements SiteAdapter {
       }
     }
 
-    // Text content search fallback
-    const allButtons = Array.from(document.querySelectorAll('button, .buttons div, div[role="button"], a[role="button"]'));
-    const nextBtn = allButtons.find(btn => {
-      const text = btn.textContent?.trim().toLowerCase() || '';
-      return text === 'next' || text === 'skip' || text === 'stop' || text === 'start' || text.includes('next');
-    }) as HTMLElement;
-
-    return nextBtn || null;
+    return null;
   }
 
   isConnected(): boolean {
     const video = this.getVideo();
-    const isLoading = this.isLoading();
+    const isSearching = this.isSearching();
     
-    // Connected if video exists, has dimensions, is actively playing, and not in loading state
-    const connected = !!video && !video.paused && !isLoading && video.videoWidth > 10;
+    // Connected if remote stranger video has dimensions, is actively playing, and not in searching/connecting state
+    const connected = !!video && !video.paused && !isSearching && video.videoWidth > 10;
     return connected;
   }
 
   isLoading(): boolean {
+    return this.isSearching();
+  }
+
+  isSearching(): boolean {
+    // Check if "Searching for a partner..." text or spinner is active
+    const pageText = document.body?.textContent || '';
+    const hasSearchingText = pageText.includes('Searching for a partner') || pageText.includes('Connecting...');
+    
     const spinner = document.querySelector('.spinner, .loading, [class*="connecting"], [class*="searching"]');
-    return !!spinner && window.getComputedStyle(spinner).display !== 'none';
+    const hasSpinner = !!spinner && window.getComputedStyle(spinner).display !== 'none';
+    
+    return hasSearchingText || hasSpinner;
   }
 
   waitForConnection(): Promise<void> {
@@ -143,28 +162,26 @@ export class OmeTVAdapter implements SiteAdapter {
   }
 
   clickNext(): void {
-    console.log('[SkipSense OmeTVAdapter] Executing Next action on OmeTV...');
+    console.log('[SkipSense OmeTVAdapter] Executing Next skip action on OmeTV...');
     
-    // 1. Direct DOM button click
+    // 1. Direct DOM button clicks on green Next button
     const nextBtn = this.getNextButton();
     if (nextBtn) {
-      nextBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-      nextBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-      nextBtn.click();
-      
-      // Secondary confirm click for OmeTV Stop -> Next flow
+      this.dispatchClickEvents(nextBtn);
+
+      // In case OmeTV toggles from Stop -> Start
       setTimeout(() => {
         const confirmBtn = this.getNextButton();
-        if (confirmBtn) {
-          confirmBtn.click();
+        if (confirmBtn && confirmBtn !== nextBtn) {
+          this.dispatchClickEvents(confirmBtn);
         }
-      }, 150);
+      }, 100);
     }
 
-    // 2. Dispatch all standard OmeTV keyboard shortcuts (Escape, ArrowRight, Enter, Space)
+    // 2. Dispatch keyboard shortcuts (Escape, ArrowRight, Enter, Space)
     const keyOptions = [
-      { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 },
       { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39 },
+      { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 },
       { key: 'Enter', code: 'Enter', keyCode: 13, which: 13 },
       { key: ' ', code: 'Space', keyCode: 32, which: 32 }
     ];
@@ -183,9 +200,20 @@ export class OmeTVAdapter implements SiteAdapter {
 
       window.dispatchEvent(keydown);
       document.dispatchEvent(keydown);
+      document.body?.dispatchEvent(keydown);
+      
       window.dispatchEvent(keyup);
       document.dispatchEvent(keyup);
+      document.body?.dispatchEvent(keyup);
     });
+  }
+
+  private dispatchClickEvents(element: HTMLElement) {
+    element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
+    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    element.click();
   }
 
   cleanup(): void {
