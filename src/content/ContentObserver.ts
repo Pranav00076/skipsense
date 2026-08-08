@@ -19,6 +19,7 @@ export class ContentObserver {
   private isProcessingFrame = false;
   private currentConnectionId = 0;
   private hudElement: HTMLElement | null = null;
+  private watchdogInterval: any = null;
 
   constructor(adapter: SiteAdapter) {
     this.adapter = adapter;
@@ -101,12 +102,22 @@ export class ContentObserver {
       }
     });
 
-    // 9. Initial state transition
+    // 9. Continuous Watchdog (Checks every 300ms if video is streaming but FSM is idle)
+    this.watchdogInterval = setInterval(() => {
+      if (this.settings.enabled && this.adapter.isConnected()) {
+        const state = this.fsm.getState();
+        if (state === 'WaitingForConnection' || state === 'Idle') {
+          this.fsm.transition('CapturingFrame', 'Watchdog triggered inference on active stream');
+        }
+      }
+    }, 300);
+
+    // 10. Initial state transition
     if (this.fsm.getState() === 'Initializing') {
       this.fsm.transition('Idle', 'Init complete');
       if (this.settings.enabled) {
         if (this.adapter.isConnected()) {
-          this.fsm.transition('WaitingDelay', 'Stranger connected on start');
+          this.fsm.transition('CapturingFrame', 'Stranger connected on start');
         } else {
           this.fsm.transition('WaitingForConnection', 'Ready for stranger');
         }
@@ -160,7 +171,7 @@ export class ContentObserver {
           if (this.fsm.getState() === 'WaitingDelay') {
             this.fsm.transition('CapturingFrame', 'Delay completed');
           }
-        }, this.settings.detectionDelayMs || 500);
+        }, 150);
       }
       
       if (to === 'CapturingFrame') {
@@ -187,15 +198,15 @@ export class ContentObserver {
         return;
       }
 
-      // Throttle inferences
+      // Throttle inferences to prevent spam
       const now = performance.now();
-      if (now - this.lastInferenceTime < (this.settings.maxInferenceIntervalMs || 600)) {
+      if (now - this.lastInferenceTime < (this.settings.maxInferenceIntervalMs || 400)) {
         setTimeout(() => {
            this.isProcessingFrame = false;
            if (this.fsm.getState() === 'CapturingFrame' && connectionId === this.currentConnectionId) {
              this.captureAndInfer();
            }
-        }, (this.settings.maxInferenceIntervalMs || 600) - (now - this.lastInferenceTime));
+        }, (this.settings.maxInferenceIntervalMs || 400) - (now - this.lastInferenceTime));
         return;
       }
       this.lastInferenceTime = now;
@@ -221,7 +232,7 @@ export class ContentObserver {
         if (this.fsm.getState() === 'Error') {
           this.fsm.transition('WaitingForConnection', 'Error recovery');
         }
-      }, 600);
+      }, 500);
     }
   }
 
@@ -260,12 +271,12 @@ export class ContentObserver {
       this.adapter.clickNext();
       this.fsm.transition('WaitingNextConnection', 'Next action executed');
       
-      // Re-arm for the next stranger
+      // Re-arm for next stranger
       setTimeout(() => {
          if (this.fsm.getState() === 'WaitingNextConnection') {
             this.fsm.transition('WaitingForConnection', 'Ready for next stranger');
          }
-      }, 350);
+      }, 300);
 
     } else if (decision === 'RETRY') {
       this.currentRetryCount++;
@@ -277,6 +288,9 @@ export class ContentObserver {
   }
 
   cleanup() {
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval);
+    }
     this.adapter.cleanup();
   }
 }

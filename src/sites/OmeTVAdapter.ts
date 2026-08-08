@@ -21,13 +21,13 @@ export class OmeTVAdapter implements SiteAdapter {
       attributeFilter: ['class', 'style', 'src', 'data-state']
     });
 
-    // 2. Continuous high-frequency polling
+    // 2. High-frequency polling (150ms) to detect connection instantly
     this.pollInterval = setInterval(() => {
       this.checkConnectionState();
-    }, 200);
+    }, 150);
 
     // 3. Listen to media stream lifecycle events on window/document
-    ['playing', 'play', 'loadeddata', 'timeupdate', 'canplay'].forEach(evtName => {
+    ['playing', 'play', 'loadeddata', 'timeupdate', 'canplay', 'loadedmetadata'].forEach(evtName => {
       window.addEventListener(evtName, () => this.checkConnectionState(), true);
     });
 
@@ -41,36 +41,34 @@ export class OmeTVAdapter implements SiteAdapter {
   }
 
   /**
-   * On OmeTV:
-   * - Left box = Remote Stranger Video
-   * - Right box = Local Webcam (Self)
-   * We strictly target the Remote Stranger Video on the left!
+   * Targets the Remote Stranger Video (Left side of OmeTV layout).
    */
   getVideo(): HTMLVideoElement | null {
     const videos = Array.from(document.querySelectorAll('video'));
     if (videos.length === 0) return null;
 
-    // 1. If explicit remote video ID or selector exists
-    const specificRemote = document.querySelector('video#remote-video, video.remote-video, [data-qa="remote-video"] video, .video-container:first-child video') as HTMLVideoElement;
-    if (specificRemote && specificRemote.videoWidth > 10 && !specificRemote.paused) {
-      return specificRemote;
-    }
-
-    // 2. In OmeTV two-video layout, videos[0] is the Remote Stranger (Left), videos[1] is Local (Right)
+    // 1. In OmeTV two-video layout:
+    // videos[0] is the Remote Stranger (Left), videos[1] is Local Webcam (Right)
     if (videos.length >= 2) {
-      const remote = videos[0]; // Remote is on the left
-      if (remote && remote.videoWidth > 10 && !remote.paused) {
+      const remote = videos[0];
+      if (remote && remote.videoWidth > 20 && !remote.paused) {
         return remote;
       }
     }
 
-    // 3. Any active video with valid dimensions that is not explicitly marked local
-    const activeRemote = videos.find(v => !v.id.includes('local') && !v.className.includes('local') && v.videoWidth > 10 && !v.paused);
+    // 2. Explicit remote selectors
+    const specificRemote = document.querySelector('video#remote-video, video.remote-video, [data-qa="remote-video"] video, .video-container:first-child video') as HTMLVideoElement;
+    if (specificRemote && specificRemote.videoWidth > 20 && !specificRemote.paused) {
+      return specificRemote;
+    }
+
+    // 3. Any active video streaming frames that is not explicitly marked local
+    const activeRemote = videos.find(v => !v.id.includes('local') && !v.className.includes('local') && v.videoWidth > 20 && !v.paused);
     return activeRemote || videos[0] || null;
   }
 
   /**
-   * Targets the large green "Next" button or "Stop" button in the bottom left
+   * Targets the large green "Next" button or "Stop" button in the bottom left.
    */
   getNextButton(): HTMLElement | null {
     // 1. Check for modal confirmation buttons first
@@ -79,18 +77,18 @@ export class OmeTVAdapter implements SiteAdapter {
       return modalButtons[0] as HTMLElement;
     }
 
-    // 2. Match exact text "Next" or "Start" on buttons
+    // 2. Find the green "Next" button in the control bar
     const allButtons = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"], .buttons > *'));
-    const textNextBtn = allButtons.find(btn => {
+    const nextBtn = allButtons.find(btn => {
       const text = btn.textContent?.trim().toLowerCase() || '';
       return text === 'next' || text === 'start';
     }) as HTMLElement;
 
-    if (textNextBtn) {
-      return textNextBtn;
+    if (nextBtn) {
+      return nextBtn;
     }
 
-    // 3. Fallback selectors
+    // 3. Selectors
     const selectors = [
       'button.btn-next',
       '.buttons__button_next',
@@ -118,26 +116,15 @@ export class OmeTVAdapter implements SiteAdapter {
 
   isConnected(): boolean {
     const video = this.getVideo();
-    const isSearching = this.isSearching();
-    
-    // Connected if remote stranger video has dimensions, is actively playing, and not in searching/connecting state
-    const connected = !!video && !video.paused && !isSearching && video.videoWidth > 10;
-    return connected;
+    if (!video) return false;
+
+    // A remote video is connected if it has valid dimensions, is playing frames, and is ready
+    const isPlaying = !video.paused && video.readyState >= 2 && video.videoWidth > 20;
+    return isPlaying;
   }
 
   isLoading(): boolean {
-    return this.isSearching();
-  }
-
-  isSearching(): boolean {
-    // Check if "Searching for a partner..." text or spinner is active
-    const pageText = document.body?.textContent || '';
-    const hasSearchingText = pageText.includes('Searching for a partner') || pageText.includes('Connecting...');
-    
-    const spinner = document.querySelector('.spinner, .loading, [class*="connecting"], [class*="searching"]');
-    const hasSpinner = !!spinner && window.getComputedStyle(spinner).display !== 'none';
-    
-    return hasSearchingText || hasSpinner;
+    return !this.isConnected();
   }
 
   waitForConnection(): Promise<void> {
@@ -169,7 +156,7 @@ export class OmeTVAdapter implements SiteAdapter {
     if (nextBtn) {
       this.dispatchClickEvents(nextBtn);
 
-      // In case OmeTV toggles from Stop -> Start
+      // Trigger confirm if OmeTV toggles to Start
       setTimeout(() => {
         const confirmBtn = this.getNextButton();
         if (confirmBtn && confirmBtn !== nextBtn) {
@@ -178,7 +165,7 @@ export class OmeTVAdapter implements SiteAdapter {
       }, 100);
     }
 
-    // 2. Dispatch keyboard shortcuts (Escape, ArrowRight, Enter, Space)
+    // 2. Dispatch all standard OmeTV keyboard shortcuts
     const keyOptions = [
       { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39, which: 39 },
       { key: 'Escape', code: 'Escape', keyCode: 27, which: 27 },

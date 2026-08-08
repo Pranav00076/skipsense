@@ -5,25 +5,24 @@ type StateChangeListener = (from: FSMState, to: FSMState, reason?: string) => vo
 
 /**
  * Finite State Machine representing the exact lifecycle of the SkipSense extension.
- * Ensures no boolean flags are used and transitions are explicit.
  */
 export class StateMachine {
   private currentState: FSMState = 'Initializing';
   private listeners: Set<StateChangeListener> = new Set();
   
-  // Defines valid transitions. Key is current state, value is array of allowed next states.
+  // Defines valid standard transitions.
   private readonly transitions: Record<FSMState, FSMState[]> = {
-    'Initializing': ['Idle', 'Error'],
-    'Idle': ['WaitingForConnection', 'Paused', 'Error'],
-    'WaitingForConnection': ['WaitingDelay', 'Paused', 'Error'],
-    'WaitingDelay': ['CapturingFrame', 'Paused', 'Error'],
-    'CapturingFrame': ['DetectingFace', 'Paused', 'Error'],
-    'DetectingFace': ['RunningInference', 'MakingDecision', 'Paused', 'Error'],
-    'RunningInference': ['MakingDecision', 'Paused', 'Error'],
-    'MakingDecision': ['Skipping', 'WaitingForConnection', 'WaitingDelay', 'Paused', 'Error'],
-    'Skipping': ['WaitingNextConnection', 'Paused', 'Error'],
-    'WaitingNextConnection': ['WaitingForConnection', 'Paused', 'Error'],
-    'Paused': ['Idle', 'Error'],
+    'Initializing': ['Idle', 'WaitingForConnection', 'WaitingDelay', 'Error'],
+    'Idle': ['WaitingForConnection', 'WaitingDelay', 'CapturingFrame', 'Paused', 'Error'],
+    'WaitingForConnection': ['WaitingDelay', 'CapturingFrame', 'Paused', 'Error'],
+    'WaitingDelay': ['CapturingFrame', 'WaitingForConnection', 'Idle', 'Paused', 'Error'],
+    'CapturingFrame': ['DetectingFace', 'WaitingForConnection', 'Idle', 'Paused', 'Error'],
+    'DetectingFace': ['RunningInference', 'MakingDecision', 'WaitingForConnection', 'Idle', 'Paused', 'Error'],
+    'RunningInference': ['MakingDecision', 'WaitingForConnection', 'Idle', 'Paused', 'Error'],
+    'MakingDecision': ['Skipping', 'WaitingForConnection', 'WaitingDelay', 'Idle', 'Paused', 'Error'],
+    'Skipping': ['WaitingNextConnection', 'WaitingForConnection', 'Idle', 'Paused', 'Error'],
+    'WaitingNextConnection': ['WaitingForConnection', 'WaitingDelay', 'CapturingFrame', 'Idle', 'Paused', 'Error'],
+    'Paused': ['Idle', 'WaitingForConnection', 'Error'],
     'Error': ['Initializing', 'Idle', 'WaitingForConnection', 'WaitingDelay']
   };
 
@@ -37,13 +36,15 @@ export class StateMachine {
 
   /**
    * Attempt to transition to a new state.
-   * Throws an error if the transition is invalid according to the state machine definition.
    */
   public transition(to: FSMState, reason?: string): boolean {
     const allowed = this.transitions[this.currentState];
     
-    // Explicit escape hatches: we can transition to Paused or Error from ANY state (except themselves).
-    const isGlobalTransition = (to === 'Paused' && this.currentState !== 'Paused') || (to === 'Error' && this.currentState !== 'Error');
+    // Global safe escape hatches: we can transition to Paused, Error, or WaitingForConnection from any active state
+    const isGlobalTransition = 
+      (to === 'Paused' && this.currentState !== 'Paused') || 
+      (to === 'Error' && this.currentState !== 'Error') ||
+      (to === 'WaitingForConnection' && this.currentState !== 'WaitingForConnection');
 
     if (!allowed?.includes(to) && !isGlobalTransition) {
       console.error(`[SkipSense FSM] Invalid transition from ${this.currentState} to ${to}`);
