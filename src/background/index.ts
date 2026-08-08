@@ -7,7 +7,7 @@ class BackgroundService {
   private stats: ExtensionStats | null = null;
 
   async init() {
-    console.log('[SkipSense Background] Initializing...');
+    console.log('[SkipSense Background] Initializing Background Service...');
     
     // 1. Load initial storage
     this.settings = await StorageService.getSettings();
@@ -20,7 +20,7 @@ class BackgroundService {
     this.setupMessageListeners();
     this.setupStorageListeners();
     
-    console.log('[SkipSense Background] Ready.', { settings: this.settings, stats: this.stats });
+    console.log('[SkipSense Background] Background Service Ready.');
   }
 
   private setupMessageListeners() {

@@ -24,7 +24,7 @@ export class StateMachine {
     'Skipping': ['WaitingNextConnection', 'Paused', 'Error'],
     'WaitingNextConnection': ['WaitingForConnection', 'Paused', 'Error'],
     'Paused': ['Idle', 'Error'],
-    'Error': ['Initializing', 'Idle']
+    'Error': ['Initializing', 'Idle', 'WaitingForConnection', 'WaitingDelay']
   };
 
   constructor(initialState: FSMState = 'Initializing') {

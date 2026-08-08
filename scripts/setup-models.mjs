@@ -23,26 +23,6 @@ const MODELS = [
   }
 ];
 
-const WASM_FILES = [
-  {
-    src: path.join(NODE_MODULES_DIR, '@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm'),
-    dest: 'vision_wasm_internal.wasm'
-  },
-  {
-    src: path.join(NODE_MODULES_DIR, '@mediapipe/tasks-vision/wasm/vision_wasm_internal.js'),
-    dest: 'vision_wasm_internal.js'
-  },
-  {
-    src: path.join(NODE_MODULES_DIR, 'onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'),
-    dest: 'ort-wasm-simd-threaded.wasm'
-  },
-  {
-    src: path.join(NODE_MODULES_DIR, 'onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'),
-    dest: 'ort-wasm-simd-threaded.jsep.wasm'
-  }
-];
-
-// Fallback hashes if we don't have exact ones (we will skip strict check if we don't know the hash yet)
 async function calculateSha256(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -58,7 +38,6 @@ async function downloadFile(url, destPath) {
     let file = fs.createWriteStream(destPath);
     let request = https.get(url, function(response) {
       if (response.statusCode === 301 || response.statusCode === 302) {
-         // Handle redirect (common for HuggingFace)
          file.close();
          return resolve(downloadFile(response.headers.location, destPath));
       }
@@ -118,10 +97,7 @@ async function run() {
         await downloadFile(model.url, destPath);
         const hash = await calculateSha256(destPath);
         
-        // If we didn't have an expected hash set, we print it for manual updating
-        if (model.expectedSha256 === '') {
-           console.log(`[?] Downloaded ${model.name}. Hash: ${hash}`);
-        } else if (hash !== model.expectedSha256) {
+        if (hash !== model.expectedSha256) {
            console.error(`[X] ERROR: SHA256 mismatch for ${model.name}!`);
            console.error(`    Expected: ${model.expectedSha256}`);
            console.error(`    Got:      ${hash}`);
@@ -137,17 +113,30 @@ async function run() {
     }
   }
 
-  // 2. Copy WASM Dependencies
-  for (const file of WASM_FILES) {
-    const destPath = path.join(PUBLIC_MODELS_DIR, file.dest);
-    if (!fs.existsSync(file.src)) {
-       console.warn(`[!] Warning: Source WASM file not found: ${file.src}`);
-       console.warn(`    Did you run npm install first?`);
-       continue;
+  // 2. Copy ALL MediaPipe Tasks Vision WASM & JS modules
+  const mpWasmDir = path.join(NODE_MODULES_DIR, '@mediapipe/tasks-vision/wasm');
+  if (fs.existsSync(mpWasmDir)) {
+    const files = fs.readdirSync(mpWasmDir);
+    for (const f of files) {
+      fs.copyFileSync(path.join(mpWasmDir, f), path.join(PUBLIC_MODELS_DIR, f));
+      console.log(`[✓] Copied MediaPipe module: ${f}`);
     }
-    
-    fs.copyFileSync(file.src, destPath);
-    console.log(`[✓] Copied ${file.dest}`);
+  } else {
+    console.warn('[!] Warning: @mediapipe/tasks-vision/wasm not found');
+  }
+
+  // 3. Copy ALL ONNX Runtime Web WASM and MJS modules
+  const ortDistDir = path.join(NODE_MODULES_DIR, 'onnxruntime-web/dist');
+  if (fs.existsSync(ortDistDir)) {
+    const files = fs.readdirSync(ortDistDir);
+    for (const f of files) {
+      if (f.endsWith('.wasm') || f.endsWith('.mjs') || f.endsWith('.js')) {
+        fs.copyFileSync(path.join(ortDistDir, f), path.join(PUBLIC_MODELS_DIR, f));
+        console.log(`[✓] Copied ONNX module: ${f}`);
+      }
+    }
+  } else {
+    console.warn('[!] Warning: onnxruntime-web/dist not found');
   }
 
   console.log('--- Setup Complete ---');

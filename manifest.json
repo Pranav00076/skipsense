@@ -10,7 +10,10 @@
     "offscreen"
   ],
   "host_permissions": [
-    "*://*.ome.tv/*"
+    "*://*.ome.tv/*",
+    "*://ome.tv/*",
+    "*://*.ometv.chat/*",
+    "*://ometv.chat/*"
   ],
   "background": {
     "service_worker": "src/background/index.ts",
@@ -18,9 +21,15 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*.ome.tv/*"],
+      "matches": [
+        "*://*.ome.tv/*",
+        "*://ome.tv/*",
+        "*://*.ometv.chat/*",
+        "*://ometv.chat/*"
+      ],
       "js": ["src/content/index.ts"],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": true
     }
   ],
   "action": {

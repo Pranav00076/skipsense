@@ -57,7 +57,6 @@ export interface InferenceResult {
 
 export type DecisionAction = 'SKIP' | 'STAY' | 'RETRY' | 'WAIT';
 
-// Message Bus Types
 export type MessageType =
   | 'SETTINGS_UPDATED'
   | 'STATS_UPDATED'
@@ -66,6 +65,7 @@ export type MessageType =
   | 'FRAME_CAPTURED'
   | 'FACE_DETECTED'
   | 'INFERENCE_RESULT'
+  | 'PROCESS_FRAME_INFERENCE'
   | 'SKIP_ACTION'
   | 'PAUSE_EXTENSION'
   | 'RESUME_EXTENSION'

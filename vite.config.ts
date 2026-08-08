@@ -22,9 +22,10 @@ export default defineConfig({
     },
   },
   build: {
+    modulePreload: false,
     rollupOptions: {
       input: {
-        worker: 'src/worker/inference.worker.ts' // Ensure worker is explicitly built
+        worker: 'src/worker/inference.worker.ts'
       }
     }
   }

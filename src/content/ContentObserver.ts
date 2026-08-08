@@ -2,13 +2,15 @@ import { SiteAdapter } from '../sites/SiteAdapter';
 import { StateMachine } from '../core/StateMachine';
 import { MessageBus } from '../core/MessageBus';
 import { DecisionEngine } from '../core/DecisionEngine';
+import { StorageService } from '../storage/StorageService';
 import { ExtensionSettings, InferenceResult } from '../types';
+import { InferencePipeline } from '../ai/InferencePipeline';
 
 export class ContentObserver {
   private adapter: SiteAdapter;
   private fsm: StateMachine;
   private settings!: ExtensionSettings;
-  private worker: Worker | null = null;
+  private pipeline: InferencePipeline;
   
   private currentRetryCount = 0;
   private lastInferenceTime = 0;
@@ -20,25 +22,20 @@ export class ContentObserver {
   constructor(adapter: SiteAdapter) {
     this.adapter = adapter;
     this.fsm = new StateMachine('Initializing');
+    this.pipeline = new InferencePipeline();
     
-    // Create a 224x224 canvas for initial frame capture (downscaling before sending to worker to save memory)
+    // Create a 224x224 canvas for initial frame capture
     this.frameCanvas = new OffscreenCanvas(224, 224);
     this.frameCtx = this.frameCanvas.getContext('2d', { willReadFrequently: true }) as OffscreenCanvasRenderingContext2D;
   }
 
   async start() {
-    console.log('[SkipSense Content] Starting ContentObserver...');
+    console.log('[SkipSense Content] Starting ContentObserver on OmeTV...');
     
-    // 1. Fetch initial settings via MessageBus
-    const response = await MessageBus.send({ type: 'SETTINGS_UPDATED' });
-    this.settings = response?.payload?.settings; 
-    
-    // Fallback if background script didn't reply properly
-    if (!this.settings) {
-       console.warn('[SkipSense Content] Failed to get settings from Background, waiting for broadcast.');
-    }
+    // 1. Fetch initial settings directly from storage
+    this.settings = await StorageService.getSettings();
 
-    // 2. Listen for settings updates
+    // 2. Listen for settings updates via MessageBus
     MessageBus.on('SETTINGS_UPDATED', (msg) => {
       this.settings = msg.payload.settings;
       if (!this.settings.enabled && this.fsm.getState() !== 'Paused') {
@@ -48,8 +45,17 @@ export class ContentObserver {
       }
     });
 
-    // 3. Initialize AI Worker
-    await this.initWorker();
+    // 3. Initialize AI Models directly in content window
+    try {
+      await this.pipeline.initialize({
+        wasm: chrome.runtime.getURL('models/'),
+        faceModel: chrome.runtime.getURL('models/blaze_face_short_range.tflite'),
+        genderModel: chrome.runtime.getURL('models/genderage.onnx')
+      }, this.settings?.preferredModelBackend || 'WASM');
+      console.log('[SkipSense Content] Local AI models ready.');
+    } catch (e) {
+      console.error('[SkipSense Content] Failed to initialize local AI models:', e);
+    }
 
     // 4. Initialize Adapter
     this.adapter.initialize();
@@ -57,61 +63,26 @@ export class ContentObserver {
     // 5. Setup FSM Handlers
     this.setupStateMachine();
 
-    // 6. Listen for connection changes
+    // 6. Listen for connection changes from OmeTV
     this.adapter.observeConnectionChanges((isConnected) => {
-      if (isConnected && this.fsm.getState() === 'WaitingForConnection') {
+      if (isConnected && (this.fsm.getState() === 'WaitingForConnection' || this.fsm.getState() === 'Idle')) {
         this.fsm.transition('WaitingDelay', 'Stranger connected');
+      } else if (!isConnected && this.fsm.getState() !== 'WaitingForConnection') {
+        this.fsm.transition('WaitingForConnection', 'Stranger disconnected');
       }
     });
 
-    // Ready
+    // 7. Set initial state
     if (this.fsm.getState() === 'Initializing') {
       this.fsm.transition('Idle', 'Init complete');
       if (this.settings?.enabled) {
-         this.fsm.transition('WaitingForConnection', 'Extension enabled on startup');
+         if (this.adapter.isConnected()) {
+            this.fsm.transition('WaitingDelay', 'Stranger already connected on load');
+         } else {
+            this.fsm.transition('WaitingForConnection', 'Extension active, waiting for stranger');
+         }
       }
     }
-  }
-
-  private async initWorker() {
-    return new Promise<void>((resolve, reject) => {
-      try {
-        // Load worker via chrome extension URL
-        const workerUrl = chrome.runtime.getURL('assets/inference.worker.js'); // Vite builds it to assets
-        this.worker = new Worker(workerUrl);
-        
-        this.worker.onmessage = (e) => {
-          const { type, payload, error } = e.data;
-          
-          if (type === 'INIT_SUCCESS') {
-            resolve();
-          } else if (type === 'INIT_ERROR') {
-            console.error('[SkipSense Content] Worker Init Error:', error);
-            reject(new Error(error));
-          } else if (type === 'INFER_SUCCESS') {
-            this.handleInferenceResult(payload as InferenceResult);
-          } else if (type === 'INFER_ERROR') {
-            console.error('[SkipSense Content] Worker Infer Error:', error);
-            this.handleInferenceResult({ prediction: 'UNKNOWN', confidence: 0, faceCount: 0, processingTimeMs: 0, error });
-          }
-        };
-
-        this.worker.postMessage({
-          type: 'INIT',
-          id: 'init',
-          payload: {
-            wasmUrl: chrome.runtime.getURL('models/'),
-            faceModelUrl: chrome.runtime.getURL('models/blaze_face_short_range.tflite'),
-            genderModelUrl: chrome.runtime.getURL('models/genderage.onnx'),
-            backend: this.settings?.preferredModelBackend || 'WASM'
-          }
-        });
-
-      } catch (e) {
-        console.error('[SkipSense Content] Failed to create Worker:', e);
-        reject(e);
-      }
-    });
   }
 
   private setupStateMachine() {
@@ -124,7 +95,7 @@ export class ContentObserver {
           } else if (!this.adapter.isConnected()) {
             this.fsm.transition('WaitingForConnection', 'Stranger disconnected during delay');
           }
-        }, this.settings.detectionDelayMs);
+        }, this.settings.detectionDelayMs || 500);
       }
       
       if (to === 'CapturingFrame') {
@@ -132,7 +103,7 @@ export class ContentObserver {
       }
 
       if (to === 'WaitingForConnection') {
-        this.currentRetryCount = 0; // Reset retries for new connection
+        this.currentRetryCount = 0; // Reset retries for new stranger
         this.currentConnectionId++; // Invalidate stale frames
       }
     });
@@ -146,61 +117,66 @@ export class ContentObserver {
     try {
       const video = this.adapter.getVideo();
       if (!video || !this.adapter.isConnected()) {
-        this.fsm.transition('WaitingForConnection', 'Video lost');
+        this.fsm.transition('WaitingForConnection', 'Video stream unavailable');
         this.isProcessingFrame = false;
         return;
       }
 
-      // Throttle inferences
+      // Throttle inferences to prevent spam
       const now = performance.now();
-      if (now - this.lastInferenceTime < this.settings.maxInferenceIntervalMs) {
-        // Wait and retry
+      if (now - this.lastInferenceTime < (this.settings.maxInferenceIntervalMs || 1000)) {
         setTimeout(() => {
            this.isProcessingFrame = false;
            if (this.fsm.getState() === 'CapturingFrame' && connectionId === this.currentConnectionId) {
              this.captureAndInfer();
            }
-        }, this.settings.maxInferenceIntervalMs - (now - this.lastInferenceTime));
+        }, (this.settings.maxInferenceIntervalMs || 1000) - (now - this.lastInferenceTime));
         return;
       }
       this.lastInferenceTime = now;
 
-      // Draw video to offscreen canvas to scale it down immediately
+      // Draw video frame to offscreen canvas
       this.frameCtx.drawImage(video, 0, 0, 224, 224);
-      
-      // Convert to ImageBitmap (zero-copy transfer to worker)
       const imageBitmap = this.frameCanvas.transferToImageBitmap();
 
-      this.fsm.transition('DetectingFace', 'Frame sent to worker');
+      this.fsm.transition('DetectingFace', 'Running local face detector and ONNX classifier');
       
-      // Send to worker
-      this.worker?.postMessage({
-        type: 'INFER',
-        id: connectionId,
-        payload: imageBitmap
-      }, [imageBitmap]); // Transfer ownership
+      // Run direct on-device inference
+      const result = await this.pipeline.execute(imageBitmap);
+      imageBitmap.close();
 
-    } catch (error) {
+      this.handleInferenceResult(result);
+
+    } catch (error: any) {
       console.error('[SkipSense Content] Capture Error:', error);
-      this.fsm.transition('Error', 'Capture failed');
+      this.fsm.transition('Error', 'Inference capture error');
       this.isProcessingFrame = false;
+      
+      // Auto recover after error
+      setTimeout(() => {
+        if (this.fsm.getState() === 'Error') {
+          this.fsm.transition('WaitingForConnection', 'Error recovery');
+        }
+      }, 1000);
     }
   }
 
   private handleInferenceResult(result: InferenceResult) {
     this.isProcessingFrame = false;
     
-    // Ensure we haven't already skipped or disconnected
+    // Ensure we are still in a valid active state
     if (!['DetectingFace', 'RunningInference'].includes(this.fsm.getState())) {
       return; 
     }
 
-    this.fsm.transition('MakingDecision', 'Result received');
+    this.fsm.transition('MakingDecision', `Result: ${result.prediction} (${(result.confidence * 100).toFixed(0)}%)`);
 
-    // Make Decision
+    // Evaluate Decision
     const decision = DecisionEngine.evaluate(result, this.settings, this.currentRetryCount);
     
-    // Broadcast stats
+    console.log(`[SkipSense Decision] Prediction: ${result.prediction} | Confidence: ${result.confidence.toFixed(2)} | Action: ${decision}`);
+
+    // Broadcast stats update to Popup & Storage
     MessageBus.send({
       type: 'STATS_UPDATED',
       payload: {
@@ -215,29 +191,27 @@ export class ContentObserver {
     });
 
     if (decision === 'SKIP') {
-      this.fsm.transition('Skipping', 'Decision: SKIP');
+      this.fsm.transition('Skipping', 'Auto-skipping stranger');
       this.adapter.clickNext();
-      this.fsm.transition('WaitingNextConnection', 'Clicked next');
+      this.fsm.transition('WaitingNextConnection', 'Next action executed');
       
-      // Re-arm immediately
+      // Re-arm for the next stranger
       setTimeout(() => {
          if (this.fsm.getState() === 'WaitingNextConnection') {
-            this.fsm.transition('WaitingForConnection', 'Ready for next');
+            this.fsm.transition('WaitingForConnection', 'Ready for next stranger');
          }
       }, 500);
 
     } else if (decision === 'RETRY') {
       this.currentRetryCount++;
-      this.fsm.transition('WaitingDelay', 'Decision: RETRY'); // Will trigger capture again
+      console.log(`[SkipSense Retry] Retrying detection (${this.currentRetryCount}/${this.settings.maxRetries})...`);
+      this.fsm.transition('WaitingDelay', 'Retrying frame inference');
     } else if (decision === 'STAY' || decision === 'WAIT') {
-      this.fsm.transition('WaitingForConnection', 'Decision: STAY/WAIT');
+      this.fsm.transition('WaitingForConnection', 'Decision accepted (STAY/WAIT)');
     }
   }
 
   cleanup() {
     this.adapter.cleanup();
-    if (this.worker) {
-      this.worker.terminate();
-    }
   }
 }

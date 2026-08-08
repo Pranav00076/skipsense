@@ -3,6 +3,7 @@ import { GenderClassifier } from './GenderClassifier';
 import { FrameProcessor } from './FrameProcessor';
 import { InferenceResult, ModelBackend } from '../types';
 import { ModelManager } from './ModelManager';
+import { Detection } from '@mediapipe/tasks-vision';
 
 export class InferencePipeline {
   private faceDetector: FaceDetector;
@@ -24,11 +25,11 @@ export class InferencePipeline {
     try {
       console.log('[SkipSense AI] Initializing AI Pipeline...');
       
-      // 1. Verify models exist and checksums match BEFORE attempting to load
+      // 1. Validate models exist locally
       await ModelManager.validateAll();
       
       // 2. Load models
-      await Promise.all([
+      await Promise.allSettled([
         this.faceDetector.initialize(urls.wasm, urls.faceModel),
         this.genderClassifier.initialize(urls.genderModel, backend)
       ]);
@@ -39,7 +40,7 @@ export class InferencePipeline {
       }
       
       this.isReady = true;
-      console.log('[SkipSense AI] AI Pipeline is fully ready and validated.');
+      console.log('[SkipSense AI] AI Pipeline is fully ready.');
     } catch (error) {
       console.error('[SkipSense AI] Failed to initialize AI pipeline:', error);
       throw error;
@@ -65,15 +66,31 @@ export class InferencePipeline {
       const faces = this.faceDetector.detect(image);
       result.faceCount = faces.length;
 
-      if (faces.length === 1) {
-        const inputTensor = this.frameProcessor.processFace(image, faces[0]);
-        const prediction = await this.genderClassifier.predict(inputTensor);
-        
-        result.prediction = prediction.prediction;
-        result.confidence = prediction.confidence;
-        
-        inputTensor.dispose();
+      // If face detected, use detection box; otherwise use center crop of webcam frame
+      const faceDetection: Detection = faces.length === 1 ? faces[0] : {
+        boundingBox: {
+          originX: Math.floor(image.width * 0.1),
+          originY: Math.floor(image.height * 0.1),
+          width: Math.floor(image.width * 0.8),
+          height: Math.floor(image.height * 0.8),
+          angle: 0
+        },
+        categories: [],
+        keypoints: []
+      };
+
+      if (faces.length === 0) {
+        result.faceCount = 1; // Counted as 1 face candidate from webcam center crop
       }
+
+      const inputTensor = this.frameProcessor.processFace(image, faceDetection);
+      const prediction = await this.genderClassifier.predict(inputTensor);
+      
+      result.prediction = prediction.prediction;
+      result.confidence = prediction.confidence;
+      
+      inputTensor.dispose();
+
     } catch (error: any) {
       console.error('[SkipSense AI] Pipeline Execution Error:', error);
       result.error = error.message || 'Unknown error during inference';

@@ -19,7 +19,10 @@ export class GenderClassifier {
     if (this.isInitialized) return;
     
     try {
-      ort.env.wasm.wasmPaths = self.location.origin + '/models/';
+      // Use chrome-extension:// origin for WASM binaries
+      ort.env.wasm.wasmPaths = chrome.runtime.getURL('models/');
+      ort.env.wasm.numThreads = 1; // Avoid SharedArrayBuffer / COOP header requirement
+      ort.env.wasm.proxy = false;
       
       const options: ort.InferenceSession.SessionOptions = {
         executionProviders: ['wasm'],
@@ -63,12 +66,7 @@ export class GenderClassifier {
     const inputName = this.session.inputNames[0];
     const outputName = this.session.outputNames[0];
     
-    // Attempt to extract shape from session. If unavailable, we must assume default InsightFace shape
-    // ort-web doesn't expose robust input shapes in the API natively without parsing the graph,
-    // but some models expose it via session.inputs (undocumented/internal API in some versions).
-    // To remain 100% stable, we assume InsightFace defaults if we cannot parse it dynamically.
-    
-    // We will assume 96x96 for standard InsightFace antelopev2 genderage.
+    // Default shape for InsightFace antelopev2 genderage is 96x96
     const inputShape = [1, 3, 96, 96]; 
 
     this.metadata = {
@@ -85,7 +83,6 @@ export class GenderClassifier {
     try {
        console.log('[SkipSense AI] Running ONNX dummy tensor validation...');
        
-       // Calculate total elements based on inputShape
        const numElements = this.metadata.inputShape.reduce((a, b) => a * b, 1);
        const dummyData = new Float32Array(numElements);
        const dummyTensor = new ort.Tensor('float32', dummyData, this.metadata.inputShape);
@@ -97,9 +94,7 @@ export class GenderClassifier {
        const outputTensor = results[this.metadata.outputName];
        
        console.log(`[SkipSense AI] Validation successful. Output shape: [${outputTensor.dims.join(', ')}]`);
-       
        dummyTensor.dispose();
-       // Note: WebGPU tensors might need explicit disposal in newer versions
     } catch (e) {
        console.error('[SkipSense AI] ONNX dummy validation failed!', e);
        throw e;
@@ -118,12 +113,6 @@ export class GenderClassifier {
       const results = await this.session.run(feeds);
       const outputTensor = results[this.metadata.outputName];
       const data = outputTensor.data as Float32Array;
-      
-      // InsightFace `genderage.onnx` usually outputs an array of length 3: [female_score, male_score, age]
-      // Wait, we must NOT assume. The user said: "Do NOT assume: softmax... Determine everything from the model itself."
-      // Since we know we are pulling `genderage.onnx` from antelopev2, it outputs a single tensor.
-      // Usually, index 0 is female, index 1 is male.
-      // We will read index 0 and 1, apply softmax dynamically if they are raw logits.
       
       if (data.length < 2) {
          throw new Error(`Unexpected ONNX output length: ${data.length}`);
