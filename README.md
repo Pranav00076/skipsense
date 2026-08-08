@@ -2,8 +2,6 @@
 
 <div align="center">
 
-![SkipSense Logo](public/assets/icon128.png)
-
 **Fully Local, 100% Offline AI-Powered Chrome Extension for Intelligent Video Chat Filtering**
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
